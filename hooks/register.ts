@@ -4,6 +4,19 @@ type Api = { consumer: string; endpoint: string; fetch(path: string, init?: { me
 
 export const addSpawnParent = (payload: Record<string, unknown>, consumer: string) => ({ ...payload, parentId: consumer })
 
+export const toolArgumentNames = (tool: any): string[] => Object.keys(tool?.inputSchema?.properties ?? {})
+
+export const forwardToolArguments = (tool: any, event: Record<string, unknown>): Record<string, unknown> => {
+  const payload: Record<string, unknown> = {}
+  for (const key of toolArgumentNames(tool)) if (event[key] !== undefined) payload[key] = event[key]
+  return payload
+}
+
+export const buildToolPayload = (tool: any, event: Record<string, unknown>, consumer: string): Record<string, unknown> => {
+  const payload: Record<string, unknown> = { session: consumer, ...forwardToolArguments(tool, event) }
+  return tool.name === 'spawn' ? addSpawnParent(payload, consumer) : payload
+}
+
 async function makeApi($: any): Promise<Api> {
   const result = await $.process.run(['python3', '-c', 'import os, pathlib; print(pathlib.Path(os.environ.get("CODEX_SUBAGENTS_STATE_DIR", pathlib.Path.home()/".codex-subagents"))/"token")'])
   const token = (await $.fs.read(result.stdout.trim())).trim()
@@ -28,6 +41,7 @@ async function makeApi($: any): Promise<Api> {
 export const register: Register = (on: any) => {
   let api: Api | undefined
   let delivering = false
+  let toolsByName = new Map<string, any>()
   on('session.start', async ($: any, e: any, next: any) => {
     const started = await next(e)
     await $.process.run(['python3', `${$.plugin.root}/backend/codex_subagents.py`, '--detach'], { timeoutMs: 5000 })
@@ -37,6 +51,7 @@ export const register: Register = (on: any) => {
     }
     if (!api) throw new Error('codex-subagents backend did not start')
     const tools = JSON.parse(await $.fs.read(`${$.plugin.root}/tools.json`))
+    toolsByName = new Map(tools.map((tool: any) => [tool.name, tool]))
     await Promise.all(tools.map((tool: any) => $.tool.register(tool)))
     $.clock.every(500, async () => {
       if (!api || delivering) return
@@ -64,14 +79,16 @@ export const register: Register = (on: any) => {
       let value: unknown
       if (name === 'list' || name === 'pending_requests' || name === 'events') {
         const path = name === 'list' ? 'list' : name === 'events' ? 'event-log' : 'requests'
-        const query = `session=${encodeURIComponent(consumer)}&all=${e.all === true}&after=${e.after ?? 0}${e.workerId ? `&workerId=${encodeURIComponent(e.workerId)}` : ''}`
-        value = await api.fetch(`/v1/${path}?${query}`)
+        const tool = toolsByName.get(name)
+        const args = forwardToolArguments(tool, e)
+        const query = new URLSearchParams({ session: consumer })
+        for (const [key, value] of Object.entries(args)) query.set(key, String(value))
+        if (name !== 'events' && args.all === undefined) query.set('all', 'false')
+        if (name === 'events' && args.after === undefined) query.set('after', '0')
+        value = await api.fetch(`/v1/${path}?${query.toString()}`)
       } else {
         const path = name === 'answer_request' ? 'answer-request' : name
-        const fields = ['prompt', 'cwd', 'model', 'effort', 'host', 'approvalPolicy', 'clientRequestId', 'id', 'message', 'ids', 'timeoutSec', 'all', 'allowOtherSession', 'requestId', 'answer', 'lastTurnId', 'beforeTurnId', 'contextHandoff']
-        const payload: Record<string, unknown> = { session: consumer }
-        if (name === 'spawn') Object.assign(payload, addSpawnParent(payload, consumer))
-        for (const key of fields) if (e[key] !== undefined) payload[key] = e[key]
+        const payload = buildToolPayload(toolsByName.get(name), e, consumer)
         value = await api.fetch(`/v1/${path}`, { method: 'POST', body: JSON.stringify(payload) })
       }
       return { result: value, text: JSON.stringify(value) }

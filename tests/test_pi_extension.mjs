@@ -18,6 +18,22 @@ test("Pi MCP client passes its native session as the spawn parent", () => {
   assert.equal(env.CLAUDE_SESSION_ID, "pi-session-1");
 });
 
+test("Pi MCP client forwards every tools.json argument unchanged", async () => {
+  const client = new McpStdioClient({ root, consumer: "pi-test-session", onNotice() {} });
+  const schemas = loadToolSchemas(root);
+  const calls = [];
+  client.start = async () => {};
+  client.request = async (method, params) => {
+    calls.push({ method, params });
+    return { content: [{ type: "text", text: "{}" }], isError: false };
+  };
+  for (const schema of schemas) {
+    const args = Object.fromEntries(Object.keys(schema.inputSchema.properties || {}).map((key) => [key, `value-${key}`]));
+    await client.callTool(schema.name, args);
+    assert.deepEqual(calls.at(-1), { method: "tools/call", params: { name: schema.name, arguments: args } });
+  }
+});
+
 test("real MCP server initializes and lists tools over stdio", async () => {
   const client = new McpStdioClient({ root, consumer: "pi-test-session", onNotice() {} });
   try {
