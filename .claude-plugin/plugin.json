@@ -1,0 +1,9 @@
+{
+  "name": "codex-subagents",
+  "version": "0.2.0",
+  "description": "Native-style Codex workers for Claude Code orchestrators.",
+  "author": {
+    "name": "Community"
+  },
+  "hooks": "./hooks/hooks.json"
+}

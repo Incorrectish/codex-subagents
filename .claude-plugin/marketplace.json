@@ -1,0 +1,14 @@
+{
+  "name": "codex-subagents",
+  "owner": {
+    "name": "Community"
+  },
+  "description": "A local marketplace for Codex workers in Claude Code.",
+  "plugins": [
+    {
+      "name": "codex-subagents",
+      "source": "./",
+      "description": "Native-style Codex workers for Claude Code orchestrators."
+    }
+  ]
+}

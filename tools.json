@@ -1,0 +1,310 @@
+[
+  {
+    "name": "spawn",
+    "description": "Spawn a background Codex worker. Returns its stable id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "prompt": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "effort": {
+          "type": "string"
+        },
+        "approvalPolicy": {
+          "enum": [
+            "on-request",
+            "never",
+            "untrusted",
+            "on-failure"
+          ]
+        },
+        "host": {
+          "enum": [
+            "local",
+            "remote"
+          ]
+        },
+        "clientRequestId": {
+          "type": "string"
+        },
+        "pending": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "prompt",
+        "cwd"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "send",
+    "description": "Send a message to a Codex worker; steers its active turn when it is running.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "allowOtherSession": {
+          "type": "boolean"
+        },
+        "clientRequestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "message"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "wait",
+    "description": "Wait for worker completion or pending approval/question attention. Returns finished workers and pending request references; pending requests wake the call immediately.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "const": "any"
+            }
+          ]
+        },
+        "timeoutSec": {
+          "type": "number"
+        },
+        "all": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "status",
+    "description": "Read one Codex worker status.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "all": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "result",
+    "description": "Read one Codex worker final result.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "all": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "stop",
+    "description": "Stop one Codex worker.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "allowOtherSession": {
+          "type": "boolean"
+        },
+        "clientRequestId": {
+          "type": "string"
+        },
+        "timeoutSec": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 30
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list",
+    "description": "List this session's persisted Codex workers; set all=true for a read-only machine-wide list.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "all": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "pending_requests",
+    "description": "List pending worker approvals and structured user-input requests.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "workerId": {
+          "type": "string"
+        },
+        "all": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "answer_request",
+    "description": "Answer a pending worker approval or user-input request.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "requestId": {
+          "type": "string"
+        },
+        "answer": {
+          "type": "object"
+        },
+        "allowOtherSession": {
+          "type": "boolean"
+        },
+        "clientRequestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "requestId",
+        "answer"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "fork",
+    "description": "Native fork of a settled worker. lastTurnId is inclusive; beforeTurnId excludes that turn. Optional contextHandoff is injected as developer context without starting inference.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "lastTurnId": {
+          "type": "string"
+        },
+        "beforeTurnId": {
+          "type": "string"
+        },
+        "contextHandoff": {
+          "type": "string"
+        },
+        "clientRequestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "rollback",
+    "description": "Revert a settled paginated native conversation before one turn. Does not undo filesystem changes.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "beforeTurnId": {
+          "type": "string"
+        },
+        "contextHandoff": {
+          "type": "string"
+        },
+        "clientRequestId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "beforeTurnId"
+      ],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "capabilities",
+    "description": "Inspect installed app-server schema capabilities for local or remote. No inference.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "enum": [
+            "local",
+            "remote"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "events",
+    "description": "Read ordered session-scoped worker events after a monotonic cursor.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "after": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+]
