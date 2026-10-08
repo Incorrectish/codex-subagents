@@ -24,7 +24,7 @@ An optional SSH worker host is enabled by passing `host="remote"` and setting `C
 | Tool | Semantics |
 | --- | --- |
 | `spawn` | Start a worker for an absolute `cwd`; returns its stable id. |
-| `send` | If the worker is running, steer the active turn with `turn/steer`; otherwise start a new turn on the same native thread. |
+| `send` | `mode: "steer"` (default): if the worker is running, steer the active turn with `turn/steer`, falling back to a new turn if that turn finishes during delivery; otherwise start a new turn on the same native thread. `mode: "queue"`: durably queue the message to run as the next turn after the current one (FIFO, one turn each); an idle worker starts it immediately. |
 | `wait` | Wait for selected workers or `any`; wakes for completion or pending approval/question requests. |
 | `status` / `result` / `list` | Read worker state, final output, and the caller's inventory. |
 | `stop` | Interrupt the worker and known native descendants; a timeout reports `stopping`. |
@@ -36,6 +36,8 @@ An optional SSH worker host is enabled by passing `host="remote"` and setting `C
 ## Safety and limitations
 
 Workers are owner-scoped to the Claude session that created them. Use an explicit session id when an MCP process will be replaced and must retain ownership. Commands with `clientRequestId` are durable and retry-safe; an uncertain transport result is reported as indeterminate and is never replayed automatically. Delivery of event notifications is at-least-once. Native process loss marks active work interrupted; send explicitly to resume. The plugin cannot undo filesystem changes, discover unrelated shell processes, or guarantee exactly-once model execution after a lost provider connection. Approvals and questions remain pending until answered or closed by the provider.
+
+Queued sends are persisted with the worker and survive daemon restart. `status` and `list` expose `pendingQueueCount` and short `pendingQueuePreviews`. A completed, failed or interrupted turn advances to the next queued message, so transient turn errors do not lose queued work. `stop` cancels remaining queued messages and records each one in `dropped_queue` with `dropReason: "explicit stop"`.
 
 ## Development and verification
 

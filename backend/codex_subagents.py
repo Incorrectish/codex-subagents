@@ -89,6 +89,8 @@ class Worker:
     runtime_generation: str | None = None
     lease_id: str | None = None
     lease_ticket: str | None = None
+    send_queue: list[dict[str, Any]] = field(default_factory=list)
+    dropped_queue: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data):
@@ -592,8 +594,13 @@ class Backend:
                 if worker.stop_requested and any(c.status in ACTIVE for c in self._children(worker)):
                     worker.status = 'stopping'
                 else:
+                    stopping = worker.stop_requested
                     worker.stop_requested = False
                     self._emit(worker, {'kind':'completion','turnId':turn_id}, event_id=f'{worker.id}:{turn_id}:terminal')
+                    if stopping:
+                        self._cancel_queue(worker)
+                    elif worker.send_queue:
+                        self._start_next_queued(worker)
                 descendant = worker
                 while descendant.parent_id and descendant.native_parent_thread:
                     parent = self.workers[descendant.parent_id]
@@ -736,6 +743,7 @@ class Backend:
 
     def _start_turn(self,worker,message):
         worker.status = 'starting'
+        worker.active_turn_id = None
         worker.final_answer = None
         worker.error = None
         worker.terminal_received = False
@@ -750,21 +758,111 @@ class Backend:
         worker.runtime_generation = getattr(self._client(worker.host),'generation',None)
         self._persist()
 
-    def send(self,worker_id,message,caller='',allow_other=False,command_id=None):
+    @staticmethod
+    def _queue_preview(message, limit=160):
+        message = str(message).replace('\n', ' ')
+        return message if len(message) <= limit else message[:limit-1] + '…'
+
+    def _worker_view(self, worker):
+        value = asdict(worker)
+        value['pendingQueueCount'] = len(worker.send_queue)
+        value['pendingQueuePreviews'] = [self._queue_preview(item.get('message', '')) for item in worker.send_queue]
+        return value
+
+    def _start_next_queued(self, worker):
+        """Start the oldest queued message, retaining it until turn/start succeeds."""
+        if not worker.send_queue or worker.active_turn_id or worker.stop_requested or worker.status in {'starting', 'stopping'}:
+            return False
+        item = worker.send_queue[0]
+        settled_status = worker.status
+        try:
+            self._start_turn(worker, item['message'])
+        except Exception as exc:
+            if isinstance(exc, RpcError) and self._steer_race(exc):
+                # A just-finished native turn can briefly reject turn/start too.
+                # Drain its terminal notification and retry the same durable item.
+                self._drain_host(worker.host)
+                try:
+                    self._start_turn(worker, item['message'])
+                except Exception as retry_exc:
+                    exc = retry_exc
+                else:
+                    worker.send_queue.pop(0)
+                    worker.updated_at = now_ms()
+                    self._persist()
+                    return True
+            # The item remains durable and visible for a later explicit retry.
+            worker.status = settled_status if settled_status in TERMINAL else 'failed'
+            worker.error = f'queued send was not started: {exc}'
+            worker.updated_at = now_ms()
+            self._persist()
+            return False
+        worker.send_queue.pop(0)
+        worker.updated_at = now_ms()
+        self._persist()
+        return True
+
+    def _cancel_queue(self, worker, reason='explicit stop'):
+        if not worker.send_queue:
+            return
+        count = len(worker.send_queue)
+        dropped_at = now_ms()
+        for item in worker.send_queue:
+            worker.dropped_queue.append({**item, 'droppedAt': dropped_at, 'dropReason': reason})
+        worker.send_queue.clear()
+        worker.updated_at = dropped_at
+        self._emit(worker, {'kind': 'queue_cancelled', 'count': count, 'reason': reason}, notify=True)
+
+    @staticmethod
+    def _steer_race(exc):
+        text = str(exc).lower()
+        return (
+            ('expected' in text and 'turn' in text) or
+            'no active turn' in text or
+            'turn is no longer active' in text or
+            'turn already completed' in text or
+            'turn completing' in text or
+            'already completing' in text or
+            'still completing' in text
+        )
+
+    def send(self,worker_id,message,caller='',allow_other=False,command_id=None,mode='steer'):
+        if mode not in {'steer', 'queue'}:
+            raise ValueError('mode must be steer or queue')
         with self.lock:
             worker = self._get(worker_id)
             self._require_mutation_owner(worker,caller,allow_other)
             self._drain_host(worker.host)
             def action():
-                if worker.stop_requested or worker.status in {'starting','stopping'}:
+                if worker.stop_requested or worker.status == 'stopping':
                     raise ValueError('worker has unsettled work')
                 self._resume(worker)
-                if worker.status=='running' and worker.active_turn_id:
-                    self._client(worker.host).call('turn/steer',{'threadId':worker.thread_id,'expectedTurnId':worker.active_turn_id,'input':[{'type':'text','text':message}]})
+                if mode == 'queue':
+                    worker.send_queue.append({'id': str(uuid.uuid4()), 'message': message, 'enqueuedAt': now_ms()})
+                    self._persist()
+                    if not worker.active_turn_id and worker.status not in {'starting', 'stopping'}:
+                        self._start_next_queued(worker)
+                elif worker.status=='running' and worker.active_turn_id:
+                    expected_turn_id = worker.active_turn_id
+                    try:
+                        self._client(worker.host).call('turn/steer',{'threadId':worker.thread_id,'expectedTurnId':expected_turn_id,'input':[{'type':'text','text':message}]})
+                    except RpcError as exc:
+                        if not self._steer_race(exc):
+                            raise
+                        # Drain a terminal notification that raced our status check,
+                        # then submit this command once as a fresh turn.
+                        self._drain_host(worker.host)
+                        if worker.stop_requested or worker.status == 'stopping':
+                            raise ValueError('worker is stopping')
+                        if worker.active_turn_id == expected_turn_id:
+                            worker.active_turn_id = None
+                        worker.send_queue.append({'id': str(uuid.uuid4()), 'message': message, 'enqueuedAt': now_ms()})
+                        self._persist()
+                        self._start_next_queued(worker)
                 else:
                     self._start_turn(worker,message)
                 return worker
-            return Worker.from_dict(self._command(caller,command_id,'send',locals_for_command(id=worker_id,message=message,allow_other=allow_other),action))
+            return Worker.from_dict(self._command(caller,command_id,'send',locals_for_command(id=worker_id,message=message,allow_other=allow_other,mode=mode),action))
 
     def _interrupt_tree(self,worker):
         worker.interrupt_descendants = True
@@ -799,6 +897,7 @@ class Backend:
             self._require_mutation_owner(worker,caller,allow_other)
             self._drain_host(worker.host)
             def action():
+                self._cancel_queue(worker)
                 self._interrupt_tree(worker)
                 deadline = time.monotonic()+max(0,min(timeout_sec,30))
                 while worker.status=='stopping' and time.monotonic()<deadline:
@@ -904,7 +1003,7 @@ class Backend:
         with self.lock:
             worker = self._get(worker_id)
             self._require_visible(worker,caller,all_workers)
-            value = asdict(worker)
+            value = self._worker_view(worker)
             value['pendingRequests'] = self._pending_refs({worker_id})
             return value
 
@@ -914,7 +1013,7 @@ class Backend:
 
     def list(self,caller,all_workers=False):
         with self.lock:
-            return [asdict(w) for w in self.workers.values() if w.owner==caller or (all_workers and w.host=='local')]
+            return [self._worker_view(w) for w in self.workers.values() if w.owner==caller or (all_workers and w.host=='local')]
 
     def snapshot(self,caller,all_workers=False):
         with self.lock:
@@ -1033,7 +1132,7 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/v1/spawn':
                 value = asdict(self.backend.spawn(p['prompt'],p['cwd'],p.get('model'),p.get('effort'),caller,command,p.get('host','local'),p.get('approvalPolicy','on-request'),bool(p.get('pending',False)),p.get('parentId')))
             elif path=='/v1/send':
-                value = asdict(self.backend.send(p['id'],p['message'],caller,bool(p.get('allowOtherSession')),command))
+                value = asdict(self.backend.send(p['id'],p['message'],caller,bool(p.get('allowOtherSession')),command,p.get('mode','steer')))
             elif path=='/v1/stop':
                 value = asdict(self.backend.stop(p['id'],caller,bool(p.get('allowOtherSession')),command,p.get('timeoutSec',10)))
             elif path=='/v1/wait':

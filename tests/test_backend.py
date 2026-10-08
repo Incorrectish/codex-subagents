@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-from backend.codex_subagents import Backend, SshAppServerClient
+from backend.codex_subagents import Backend, RpcError, SshAppServerClient
 
 
 class FakeAppServer:
@@ -18,6 +18,7 @@ class FakeAppServer:
         self.thread_count = 0
         self.responses = []
         self.auto_interrupt = True
+        self.steer_race = False
         self.generation = "fixture"
         self.remote_pid = 321
         self.remote_uid = 1000
@@ -37,6 +38,9 @@ class FakeAppServer:
         if method == "turn/start":
             self.turn += 1
             return {"turn": {"id": f"turn-{self.turn}"}}
+        if method == "turn/steer" and self.steer_race:
+            self.steer_race = False
+            raise RpcError("expectedTurnId does not match; no active turn")
         if method == "thread/read":
             return {"thread": {"id":params["threadId"],"historyMode":"paginated"}}
         if method == "thread/turns/list":
@@ -87,6 +91,63 @@ class BackendTests(unittest.TestCase):
         self.settle()
         self.backend.send(worker.id, "follow up", "session-a")
         self.assertEqual([c[0] for c in self.fake.calls][-1], "turn/start")
+
+    def test_queued_send_delivers_fifo_one_turn_each(self):
+        worker = self.backend.spawn("first", self.tmp.name, owner="session-a")
+        self.backend.send(worker.id, "second", "session-a", mode="queue")
+        self.backend.send(worker.id, "third", "session-a", mode="queue")
+        status = self.backend.status(worker.id, "session-a")
+        self.assertEqual(status["pendingQueueCount"], 2)
+        self.assertEqual(status["pendingQueuePreviews"], ["second", "third"])
+        self.fake.complete("first", "turn-1", worker.thread_id)
+        self.settle()
+        self.assertEqual(self.backend.status(worker.id, "session-a")["pendingQueuePreviews"], ["third"])
+        self.assertEqual(self.fake.calls[-1][0], "turn/start")
+        self.fake.complete("second", "turn-2", worker.thread_id)
+        self.settle()
+        self.assertEqual(self.backend.status(worker.id, "session-a")["pendingQueueCount"], 0)
+        self.fake.complete("third", "turn-3", worker.thread_id)
+        self.settle()
+        self.assertEqual(self.backend.status(worker.id, "session-a")["status"], "completed")
+
+    def test_queued_send_persists_across_restart(self):
+        worker = self.backend.spawn("first", self.tmp.name, owner="session-a")
+        self.backend.send(worker.id, "survives restart", "session-a", mode="queue")
+        self.backend.close()
+        recovered = Backend(Path(self.tmp.name), FakeAppServer())
+        try:
+            status = recovered.status(worker.id, "session-a")
+            self.assertEqual(status["pendingQueueCount"], 1)
+            self.assertEqual(status["pendingQueuePreviews"], ["survives restart"])
+        finally:
+            recovered.close()
+
+    def test_queued_send_advances_after_failed_turn(self):
+        worker = self.backend.spawn("first", self.tmp.name, owner="session-a")
+        self.backend.send(worker.id, "after failure", "session-a", mode="queue")
+        self.fake.notifications.put({"method": "turn/completed", "params": {"threadId": worker.thread_id, "turn": {"id": "turn-1", "status": "failed", "error": {"message": "fixture failure"}, "items": []}}})
+        self.settle()
+        self.assertEqual(self.backend.status(worker.id, "session-a")["pendingQueueCount"], 0)
+        self.assertEqual(self.fake.calls[-1][0], "turn/start")
+
+    def test_stop_cancels_queued_messages_with_reason(self):
+        worker = self.backend.spawn("first", self.tmp.name, owner="session-a")
+        self.backend.send(worker.id, "drop one", "session-a", mode="queue")
+        self.backend.send(worker.id, "drop two", "session-a", mode="queue")
+        self.backend.stop(worker.id, "session-a")
+        status = self.backend.status(worker.id, "session-a")
+        self.assertEqual(status["pendingQueueCount"], 0)
+        self.assertEqual([item["dropReason"] for item in status["dropped_queue"]], ["explicit stop", "explicit stop"])
+
+    def test_steer_race_falls_back_to_one_new_turn(self):
+        worker = self.backend.spawn("first", self.tmp.name, owner="session-a")
+        self.fake.steer_race = True
+        self.backend.send(worker.id, "race recovery", "session-a", command_id="race-1")
+        self.assertEqual([method for method, _ in self.fake.calls].count("turn/steer"), 1)
+        self.assertEqual([method for method, _ in self.fake.calls].count("turn/start"), 2)
+        retry = self.backend.send(worker.id, "race recovery", "session-a", command_id="race-1")
+        self.assertEqual(retry.active_turn_id, self.backend.status(worker.id, "session-a")["active_turn_id"])
+        self.assertEqual([method for method, _ in self.fake.calls].count("turn/start"), 2)
 
     def test_spawn_records_native_parent_id(self):
         worker = self.backend.spawn("child", self.tmp.name, owner="claude-session", parent_id="claude-session")

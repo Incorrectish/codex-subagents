@@ -47,7 +47,7 @@
   },
   {
     "name": "send",
-    "description": "Send a message to a Codex worker; steers its active turn when it is running.",
+    "description": "Send a message to a Codex worker. mode=steer (default) steers the active turn or starts one when idle; mode=queue delivers it as the next turn.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -56,6 +56,13 @@
         },
         "message": {
           "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "steer",
+            "queue"
+          ],
+          "default": "steer"
         },
         "allowOtherSession": {
           "type": "boolean"
